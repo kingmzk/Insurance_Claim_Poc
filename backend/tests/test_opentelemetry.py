@@ -123,3 +123,29 @@ def test_telemetry_api_endpoints():
     reset_resp = client.post("/api/telemetry/reset")
     assert reset_resp.status_code == 200
     assert reset_resp.json()["status"] == "success"
+
+def test_prometheus_metrics_endpoints():
+    """Verifies official Prometheus scraping endpoints on /metrics and /api/metrics."""
+    client = TestClient(app)
+    
+    # Run a quick routine STP claim to ensure metrics are recorded
+    payload = SYNTHETIC_SCENARIOS["routine_stp"]["payload"]
+    req = ClaimSubmissionRequest(**payload)
+    submit_claim(req)
+
+    # 1. Root /metrics
+    resp = client.get("/metrics")
+    assert resp.status_code == 200
+    assert "text/plain" in resp.headers["content-type"]
+    body = resp.text
+    assert "insurance_claims_submitted_total" in body
+    assert "insurance_claims_processed_total" in body
+    assert "insurance_claims_settlement_payout_dollars" in body
+    assert "insurance_agent_execution_duration_seconds" in body
+    assert 'is_stp="true"' in body
+
+    # 2. API /api/metrics
+    api_resp = client.get("/api/metrics")
+    assert api_resp.status_code == 200
+    assert "text/plain" in api_resp.headers["content-type"]
+    assert "insurance_claims_processed_total" in api_resp.text

@@ -2,14 +2,14 @@ import json
 import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Response
 
 from ..models.state import ClaimSubmissionRequest, ReviewDecisionRequest, ClaimState
 from ..workflow.graph import claims_graph
 from ..db.database import get_db_connection
 from ..services.ledger_service import LedgerService
 from ..services.observability_service import observability_service
-from ..core.telemetry import telemetry_manager
+from ..core.telemetry import telemetry_manager, CONTENT_TYPE_LATEST
 
 router = APIRouter(prefix="/api")
 
@@ -617,6 +617,11 @@ def reset_telemetry():
     """Clears in-memory OpenTelemetry span buffer."""
     telemetry_manager.clear_spans()
     return {"status": "success", "message": "In-memory OpenTelemetry span buffer cleared."}
+
+@router.get("/metrics")
+def get_prometheus_metrics():
+    """Returns official Prometheus exposition metrics on /api/metrics."""
+    return Response(content=telemetry_manager.get_prometheus_metrics(), media_type=CONTENT_TYPE_LATEST)
 
 
 

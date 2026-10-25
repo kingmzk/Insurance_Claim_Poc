@@ -28,7 +28,74 @@ from .config import (
     OTEL_TRACES_CONSOLE,
 )
 
+from prometheus_client import (
+    Counter as PromCounter,
+    Histogram as PromHistogram,
+    generate_latest,
+    CONTENT_TYPE_LATEST,
+    REGISTRY
+)
+
 logger = logging.getLogger("telemetry")
+
+def get_or_create_prom_counter(name: str, documentation: str, labelnames=()):
+    """Safely retrieves existing counter or creates new one without collision."""
+    if name in REGISTRY._names_to_collectors:
+        return REGISTRY._names_to_collectors[name]
+    return PromCounter(name, documentation, labelnames=labelnames)
+
+def get_or_create_prom_histogram(name: str, documentation: str, labelnames=(), buckets=None):
+    """Safely retrieves existing histogram or creates new one without collision."""
+    if name in REGISTRY._names_to_collectors:
+        return REGISTRY._names_to_collectors[name]
+    kwargs = {}
+    if buckets is not None:
+        kwargs["buckets"] = buckets
+    return PromHistogram(name, documentation, labelnames=labelnames, **kwargs)
+
+# Standard Prometheus Metrics
+PROM_CLAIMS_SUBMITTED = get_or_create_prom_counter(
+    "insurance_claims_submitted_total",
+    "Total count of submitted insurance claims",
+    labelnames=["claim_type", "loss_type"]
+)
+
+PROM_CLAIMS_PROCESSED = get_or_create_prom_counter(
+    "insurance_claims_processed_total",
+    "Total count of processed insurance claims",
+    labelnames=["status", "loss_type", "is_stp"]
+)
+
+PROM_SIU_REFERRALS = get_or_create_prom_counter(
+    "insurance_claims_siu_referrals_total",
+    "Total count of claims escalated to Special Investigations Unit (SIU)",
+    labelnames=["reason"]
+)
+
+PROM_POLICY_EXCEPTIONS = get_or_create_prom_counter(
+    "insurance_claims_policy_exceptions_total",
+    "Total count of policy coverage exceptions / denials drafted",
+    labelnames=["reason"]
+)
+
+PROM_SETTLEMENT_PAYOUT = get_or_create_prom_histogram(
+    "insurance_claims_settlement_payout_dollars",
+    "Approved claim settlement payout amounts in USD",
+    buckets=[0, 500, 1000, 2500, 5000, 10000, 25000, 50000]
+)
+
+PROM_FRAUD_SCORE = get_or_create_prom_histogram(
+    "insurance_claims_fraud_score",
+    "Distribution of composite fraud risk scores (0-100 scale)",
+    buckets=[0, 10, 25, 50, 75, 90, 100]
+)
+
+PROM_AGENT_DURATION = get_or_create_prom_histogram(
+    "insurance_agent_execution_duration_seconds",
+    "Execution latency of individual autonomous agents in seconds",
+    labelnames=["agent_name"],
+    buckets=[0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.5, 5.0, 10.0]
+)
 
 class BoundedInMemorySpanExporter(SpanExporter):
     """
@@ -265,24 +332,35 @@ class TelemetryManager:
                 )
                 self._metric_totals["agent_spans_recorded"] += 1
 
+                # Record in Prometheus histogram (in seconds)
+                try:
+                    PROM_AGENT_DURATION.labels(agent_name=agent_name).observe(elapsed_ms / 1000.0)
+                except Exception as e:
+                    logger.debug(f"Prometheus agent duration metric error: {e}")
+
     # =========================================================================
     # Domain Metric Recording
     # =========================================================================
     def record_submission(self, claim_id: str, claim_type: str, loss_type: str, claimed_amt: float):
-        """Records initial claim submission in OpenTelemetry metrics."""
+        """Records initial claim submission in OpenTelemetry and Prometheus metrics."""
         self.claims_submitted_counter.add(
             1,
             attributes={"claim.type": claim_type, "claim.loss_type": loss_type}
         )
         self._metric_totals["claims_submitted"] += 1
 
+        try:
+            PROM_CLAIMS_SUBMITTED.labels(claim_type=claim_type, loss_type=loss_type).inc()
+        except Exception as e:
+            logger.debug(f"Prometheus claims submitted metric error: {e}")
+
     def record_claim_completion(self, final_state: Dict[str, Any]):
         """
         Records comprehensive outcome metrics for a completed claim run:
-        - Claims processed counter
-        - Fraud score distribution
-        - Settlement payout distribution
-        - SIU / Policy exception flags
+        - Claims processed counter (OTel + Prometheus)
+        - Fraud score distribution (OTel + Prometheus)
+        - Settlement payout distribution (OTel + Prometheus)
+        - SIU / Policy exception flags (OTel + Prometheus)
         """
         status = final_state.get("current_status", "UNKNOWN")
         claim_type = final_state.get("claim_type", "motor")
@@ -303,6 +381,15 @@ class TelemetryManager:
         if is_stp:
             self._metric_totals["claims_stp"] += 1
 
+        try:
+            PROM_CLAIMS_PROCESSED.labels(
+                status=status,
+                loss_type=loss_type,
+                is_stp=str(is_stp).lower()
+            ).inc()
+        except Exception as e:
+            logger.debug(f"Prometheus claims processed metric error: {e}")
+
         # Fraud metric
         fraud_rep = final_state.get("fraud_report", {})
         if fraud_rep and "fraud_score" in fraud_rep:
@@ -313,12 +400,21 @@ class TelemetryManager:
             )
             self._metric_totals["fraud_scores_recorded"] += 1
 
+            try:
+                PROM_FRAUD_SCORE.observe(fraud_score)
+            except Exception as e:
+                logger.debug(f"Prometheus fraud score metric error: {e}")
+
             if fraud_rep.get("siu_escalate"):
                 self.siu_referrals_counter.add(
                     1,
                     attributes={"reason": "high_fraud_score"}
                 )
                 self._metric_totals["siu_referrals"] += 1
+                try:
+                    PROM_SIU_REFERRALS.labels(reason="high_fraud_score").inc()
+                except Exception as e:
+                    logger.debug(f"Prometheus SIU metric error: {e}")
 
         # Policy exception metric
         policy_val = final_state.get("policy_validation", {})
@@ -329,6 +425,10 @@ class TelemetryManager:
                 attributes={"reason": reason[:60]}
             )
             self._metric_totals["policy_exceptions"] += 1
+            try:
+                PROM_POLICY_EXCEPTIONS.labels(reason=reason[:60]).inc()
+            except Exception as e:
+                logger.debug(f"Prometheus policy exception metric error: {e}")
 
         # Settlement payout metric
         settle_dec = final_state.get("settlement_decision", {})
@@ -340,6 +440,10 @@ class TelemetryManager:
                     attributes={"claim.status": status, "claim.loss_type": loss_type}
                 )
                 self._metric_totals["total_payout_amount"] += payout
+                try:
+                    PROM_SETTLEMENT_PAYOUT.observe(payout)
+                except Exception as e:
+                    logger.debug(f"Prometheus settlement payout metric error: {e}")
 
     # =========================================================================
     # Telemetry Inspection & Status API
@@ -385,11 +489,16 @@ class TelemetryManager:
                 "otlp_endpoint": OTEL_EXPORTER_OTLP_ENDPOINT or "none (in-memory buffer active)",
                 "otlp_active": self.otlp_enabled,
                 "console_logging": OTEL_TRACES_CONSOLE,
+                "prometheus_metrics": "/metrics",
             },
             "spans_recorded_total": len(finished_spans),
             "metric_totals": self._metric_totals,
             "recent_spans": recent_spans_summary,
         }
+
+    def get_prometheus_metrics(self) -> bytes:
+        """Exports all Prometheus metrics in official exposition text format."""
+        return generate_latest()
 
     def clear_spans(self):
         """Resets the in-memory span buffer (useful for unit tests)."""
@@ -398,3 +507,4 @@ class TelemetryManager:
 
 # Global Singleton Telemetry Manager
 telemetry_manager = TelemetryManager()
+

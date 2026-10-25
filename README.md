@@ -7,6 +7,7 @@
 [![React](https://img.shields.io/badge/React-18.0+-61DAFB.svg?logo=react&logoColor=black)](https://react.dev)
 [![DeepEval](https://img.shields.io/badge/DeepEval-100%25_Passing-10b981.svg)](https://confident-ai.com)
 [![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-v1.25+-blueviolet.svg?logo=opentelemetry&logoColor=white)](https://opentelemetry.io/)
+[![Prometheus](https://img.shields.io/badge/Prometheus-Metrics_Exposition-E6522C.svg?logo=prometheus&logoColor=white)](https://prometheus.io/)
 [![Langfuse](https://img.shields.io/badge/Langfuse-Live_Tracing-ec4899.svg)](https://langfuse.com)
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB.svg?logo=python&logoColor=white)](https://python.org)
 
@@ -403,6 +404,34 @@ The platform implements an enterprise-grade, native **OpenTelemetry (OTel)** tel
 - `GET /api/telemetry/status`: Returns current OpenTelemetry runtime status, service name, metric totals, and recent spans.
 - `GET /api/telemetry/spans?claim_id={id}&limit=50`: Retrieves filtered OpenTelemetry spans captured by the in-memory buffer.
 - `POST /api/telemetry/reset`: Clears in-memory span buffer for clean testing sessions.
+
+### 5. Prometheus Metrics Exposition (`/metrics`)
+For teams operating Prometheus servers or Grafana Agents, AegisFlow exposes the official Prometheus text exposition format on both `/metrics` and `/api/metrics`:
+- **`GET /metrics`**: Standard root Prometheus scrape target (`Content-Type: text/plain; charset=utf-8`).
+- **`GET /api/metrics`**: API-mounted scrape target.
+
+Prometheus Metric Catalog:
+```prometheus
+# HELP insurance_claims_submitted_total Total count of submitted insurance claims
+# TYPE insurance_claims_submitted_total counter
+insurance_claims_submitted_total{claim_type="motor",loss_type="rear_collision"} 5
+
+# HELP insurance_claims_processed_total Total count of processed insurance claims
+# TYPE insurance_claims_processed_total counter
+insurance_claims_processed_total{is_stp="true",loss_type="rear_collision",status="SETTLED_STP"} 5
+
+# HELP insurance_claims_settlement_payout_dollars Approved claim settlement payout amounts in USD
+# TYPE insurance_claims_settlement_payout_dollars histogram
+insurance_claims_settlement_payout_dollars_bucket{le="1000.0"} 0.0
+insurance_claims_settlement_payout_dollars_bucket{le="5000.0"} 5.0
+insurance_claims_settlement_payout_dollars_sum 11200.0
+insurance_claims_settlement_payout_dollars_count 5.0
+
+# HELP insurance_agent_execution_duration_seconds Execution latency of individual autonomous agents in seconds
+# TYPE insurance_agent_execution_duration_seconds histogram
+insurance_agent_execution_duration_seconds_bucket{agent_name="policy",le="5.0"} 5.0
+insurance_agent_execution_duration_seconds_bucket{agent_name="fraud",le="0.05"} 5.0
+```
 
 ---
 

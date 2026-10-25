@@ -1,10 +1,10 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from .core.config import API_HOST, API_PORT
-from .core.telemetry import telemetry_manager
+from .core.telemetry import telemetry_manager, CONTENT_TYPE_LATEST
 from .db.database import init_db
 from .api.routes import router
 
@@ -46,10 +46,15 @@ app.add_middleware(
 FastAPIInstrumentor.instrument_app(
     app,
     tracer_provider=telemetry_manager.tracer_provider,
-    excluded_urls="docs,openapi.json"
+    excluded_urls="docs,openapi.json,metrics"
 )
 
 app.include_router(router)
+
+@app.get("/metrics", tags=["Observability"])
+def prometheus_metrics():
+    """Official Prometheus metrics scraping endpoint in standard exposition text format."""
+    return Response(content=telemetry_manager.get_prometheus_metrics(), media_type=CONTENT_TYPE_LATEST)
 
 @app.get("/")
 def root():
@@ -59,10 +64,13 @@ def root():
         "version": "1.0.0",
         "telemetry": {
             "opentelemetry": "active",
+            "prometheus_metrics": "/metrics",
+            "langfuse": "active",
             "service_name": telemetry_manager.service_name,
         },
         "docs_url": "/docs"
     }
+
 
 if __name__ == "__main__":
     import uvicorn
