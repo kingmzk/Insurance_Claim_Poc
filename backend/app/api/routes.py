@@ -9,6 +9,7 @@ from ..workflow.graph import claims_graph
 from ..db.database import get_db_connection
 from ..services.ledger_service import LedgerService
 from ..services.observability_service import observability_service
+from ..core.telemetry import telemetry_manager
 
 router = APIRouter(prefix="/api")
 
@@ -148,18 +149,20 @@ def persist_claim_run(final_state: ClaimState):
     
     trace_id = final_state.get("trace_id")
     trace_url = final_state.get("trace_url")
+    otel_trace_id = final_state.get("otel_trace_id")
     
     # 1. Insert or update claims
     cursor.execute("""
-    INSERT INTO claims (claim_id, status, claim_type, created_at, updated_at, state_json, trace_id, trace_url)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO claims (claim_id, status, claim_type, created_at, updated_at, state_json, trace_id, trace_url, otel_trace_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(claim_id) DO UPDATE SET
         status = excluded.status,
         updated_at = excluded.updated_at,
         state_json = excluded.state_json,
         trace_id = excluded.trace_id,
-        trace_url = excluded.trace_url;
-    """, (claim_id, status, claim_type, now, now, state_json, trace_id, trace_url))
+        trace_url = excluded.trace_url,
+        otel_trace_id = excluded.otel_trace_id;
+    """, (claim_id, status, claim_type, now, now, state_json, trace_id, trace_url, otel_trace_id))
 
     
     # 2. Insert audit events
@@ -289,22 +292,47 @@ def submit_claim(request: ClaimSubmissionRequest):
     if langfuse_handler:
         config["callbacks"] = [langfuse_handler]
 
-    # Execute LangGraph state machine
-    try:
-        final_state = claims_graph.invoke(initial_state, config=config)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Orchestration failure: {str(e)}")
+    # OpenTelemetry Metric: Record submission
+    telemetry_manager.record_submission(
+        claim_id=claim_id,
+        claim_type=request.claim_type,
+        loss_type=request.loss_type,
+        claimed_amt=request.claimed_amt
+    )
+
+    # Execute LangGraph state machine inside root OpenTelemetry span
+    with telemetry_manager.tracer.start_as_current_span("insurance.claim.adjudication") as root_span:
+        root_span.set_attribute("insurance.claim.id", claim_id)
+        root_span.set_attribute("claim.type", request.claim_type)
+        root_span.set_attribute("claim.loss_type", request.loss_type)
+        root_span.set_attribute("claim.claimed_amt", request.claimed_amt)
+        root_span.set_attribute("claim.policy_no", request.policy_no)
+        root_span.set_attribute("claimant.name", request.claimant_name)
+
+        try:
+            final_state = claims_graph.invoke(initial_state, config=config)
+        except Exception as e:
+            root_span.record_exception(e)
+            raise HTTPException(status_code=500, detail=f"Orchestration failure: {str(e)}")
+
+        otel_ctx = root_span.get_span_context()
+        otel_trace_id = telemetry_manager.format_trace_id(otel_ctx.trace_id)
+        root_span.set_attribute("claim.status", final_state.get("current_status", "UNKNOWN"))
 
     # Extract trace ID and generate direct Langfuse Trace URL
     trace_id = getattr(langfuse_handler, "last_trace_id", None) if langfuse_handler else None
     trace_url = observability_service.get_trace_url(trace_id) if trace_id else None
     
-    final_state["trace_id"] = trace_id
+    final_state["trace_id"] = trace_id or otel_trace_id
+    final_state["otel_trace_id"] = otel_trace_id
     final_state["trace_url"] = trace_url
 
     # Record domain evaluation scores to Langfuse session
     observability_service.record_claim_metrics(final_state, trace_id=trace_id)
     observability_service.flush()
+
+    # Record OpenTelemetry completion metrics & counter increments
+    telemetry_manager.record_claim_completion(final_state)
         
     # Persist in SQLite
     persist_claim_run(final_state)
@@ -325,6 +353,7 @@ def list_claims(limit: int = 20):
         st = json.loads(r["state_json"])
         trace_id = r["trace_id"] if "trace_id" in r.keys() else st.get("trace_id")
         trace_url = r["trace_url"] if "trace_url" in r.keys() else st.get("trace_url")
+        otel_trace_id = r["otel_trace_id"] if "otel_trace_id" in r.keys() else st.get("otel_trace_id")
         results.append({
             "claim_id": r["claim_id"],
             "status": r["status"],
@@ -332,6 +361,7 @@ def list_claims(limit: int = 20):
             "created_at": r["created_at"],
             "updated_at": r["updated_at"],
             "trace_id": trace_id,
+            "otel_trace_id": otel_trace_id,
             "trace_url": trace_url,
             "state": st
         })
@@ -355,10 +385,12 @@ def get_claim(claim_id: str):
     st = json.loads(row["state_json"])
     trace_id = row["trace_id"] if "trace_id" in row.keys() else st.get("trace_id")
     trace_url = row["trace_url"] if "trace_url" in row.keys() else st.get("trace_url")
+    otel_trace_id = row["otel_trace_id"] if "otel_trace_id" in row.keys() else st.get("otel_trace_id")
     return {
         "claim_id": row["claim_id"],
         "status": row["status"],
         "trace_id": trace_id,
+        "otel_trace_id": otel_trace_id,
         "trace_url": trace_url,
         "state": st,
         "review_tasks": tasks
@@ -556,6 +588,35 @@ def get_observability_status():
         "base_url": "https://us.cloud.langfuse.com",
         "has_keys": bool(observability_service.client is not None)
     }
+
+# ==============================================================================
+# OpenTelemetry Endpoints
+# ==============================================================================
+@router.get("/telemetry/status")
+def get_telemetry_status():
+    """
+    Returns full OpenTelemetry runtime diagnostics, active Tracer/Meter providers,
+    exporter states, metric counters, and formatted recent spans.
+    """
+    return telemetry_manager.get_telemetry_status()
+
+@router.get("/telemetry/spans")
+def list_telemetry_spans(claim_id: Optional[str] = None, limit: int = 50):
+    """
+    Retrieves recent OpenTelemetry spans captured by the in-memory exporter.
+    Optionally filters by claim_id.
+    """
+    status = telemetry_manager.get_telemetry_status()
+    spans = status.get("recent_spans", [])
+    if claim_id:
+        spans = [s for s in spans if s.get("attributes", {}).get("insurance.claim.id") == claim_id or s.get("attributes", {}).get("claim.id") == claim_id]
+    return spans[:limit]
+
+@router.post("/telemetry/reset")
+def reset_telemetry():
+    """Clears in-memory OpenTelemetry span buffer."""
+    telemetry_manager.clear_spans()
+    return {"status": "success", "message": "In-memory OpenTelemetry span buffer cleared."}
 
 
 

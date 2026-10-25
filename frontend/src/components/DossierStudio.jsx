@@ -57,6 +57,45 @@ export default function DossierStudio({ claimState, reviewTasks, onRecordDecisio
 
   return (
     <div className="dossier-pane">
+      {/* OpenTelemetry & Langfuse Telemetry Ribbon */}
+      {(claimState.otel_trace_id || claimState.trace_id || claimState.trace_url) && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.75rem',
+          padding: '0.5rem 1rem',
+          background: 'rgba(6, 182, 212, 0.06)',
+          borderBottom: '1px solid rgba(6, 182, 212, 0.2)',
+          fontSize: '0.72rem',
+          fontFamily: 'var(--font-mono)',
+          color: '#a5f3fc'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+            <span style={{ color: '#06b6d4', fontWeight: 700 }}>OTel Trace:</span>
+            <span style={{ color: '#e0f2fe' }}>{claimState.otel_trace_id || claimState.trace_id}</span>
+          </div>
+          {claimState.trace_url && (
+            <a 
+              href={claimState.trace_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                marginLeft: 'auto',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.25rem',
+                color: '#ec4899',
+                textDecoration: 'none'
+              }}
+              title="Open Trace in Langfuse"
+            >
+              <span>Langfuse Live Trace</span>
+              <ExternalLink size={11} />
+            </a>
+          )}
+        </div>
+      )}
+
       {/* Dossier Tabs */}
       <div className="dossier-tabs-nav">
         <button 

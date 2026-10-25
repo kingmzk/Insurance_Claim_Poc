@@ -47,4 +47,7 @@ if LANGFUSE_BASE_URL:
     os.environ["LANGFUSE_BASE_URL"] = LANGFUSE_BASE_URL
 if LANGFUSE_HOST:
     os.environ["LANGFUSE_HOST"] = LANGFUSE_HOST
-
+# OpenTelemetry Observability Configuration
+OTEL_SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME", "insurance-claims-orchestrator")
+OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+OTEL_TRACES_CONSOLE = os.getenv("OTEL_TRACES_CONSOLE", "false").lower() in ("true", "1", "yes")

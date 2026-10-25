@@ -6,6 +6,7 @@
 [![LangGraph](https://img.shields.io/badge/LangGraph-0.2+-blue.svg)](https://langchain-ai.github.io/langgraph/)
 [![React](https://img.shields.io/badge/React-18.0+-61DAFB.svg?logo=react&logoColor=black)](https://react.dev)
 [![DeepEval](https://img.shields.io/badge/DeepEval-100%25_Passing-10b981.svg)](https://confident-ai.com)
+[![OpenTelemetry](https://img.shields.io/badge/OpenTelemetry-v1.25+-blueviolet.svg?logo=opentelemetry&logoColor=white)](https://opentelemetry.io/)
 [![Langfuse](https://img.shields.io/badge/Langfuse-Live_Tracing-ec4899.svg)](https://langfuse.com)
 [![Python](https://img.shields.io/badge/Python-3.11+-3776AB.svg?logo=python&logoColor=white)](https://python.org)
 
@@ -317,36 +318,91 @@ SQLite operates in **WAL (Write-Ahead Logging)** mode with strict foreign key co
 
 ---
 
-## Observability & OpenTelemetry (Langfuse)
+## Observability & Distributed Tracing (OpenTelemetry & Langfuse)
 
-The application integrates **Langfuse** for complete execution visibility into multi-agent runs and LLM generations:
+The platform implements an enterprise-grade, native **OpenTelemetry (OTel)** telemetry engine coupled with **Langfuse** for complete execution visibility into the multi-agent graph, HTTP requests, and LLM generations:
 
 ```
-[ Root Trace: Insurance Claim Workflow - CLM-DEMO-001 ]
- ├── [ Span: intake_agent ]
- │    └── [ Generation: gemini_generate_content (extract_fnol) ]
- ├── [ Span: policy_agent ]
- │    ├── [ Span: sqlite_fts5_rag_query ]
- │    └── [ Generation: gemini_generate_content (coverage_brief) ]
- ├── [ Span: fraud_agent ]
- │    └── [ Span: phash_exif_forensics ]
- ├── [ Span: risk_agent ]
- │    └── [ Span: oem_pricing_schedule ]
- └── [ Span: settlement_agent ]
-      └── [ Span: simulated_ach_disbursement ]
- 
- [ Langfuse Session Scores Applied ]
-  ├── intake_completeness: 1.00
-  ├── policy_eligibility: 1.00
-  ├── fraud_risk_score: 12.00
-  ├── proposed_payout: $2,240.00
-  └── straight_through_processing: 1.00
+[ W3C Distributed Trace: insurance.claim.adjudication (32-char Hex ID) ]
+ │
+ ├── [ HTTP Server Span: POST /api/claims/submit ] ────> Injects X-Trace-Id header
+ │
+ ├── [ Root Claim Span: insurance.claim.adjudication ]
+ │    ├── Attribute: claim.id = "CLM-DEMO-001"
+ │    ├── Attribute: claim.loss_type = "rear_collision"
+ │    ├── Attribute: claim.claimed_amt = 3200.00
+ │    │
+ │    ├── [ Child Span: agent.intake ] ─────── (Duration: 1,842 ms, Status: OK)
+ │    │    ├── Attribute: claim.completeness = 1.00
+ │    │    └── Attribute: claim.status = "INTAKE_PASSED"
+ │    │
+ │    ├── [ Child Span: agent.policy ] ─────── (Duration: 3,110 ms, Status: OK)
+ │    │    ├── Attribute: policy.eligible = true
+ │    │    ├── Attribute: policy.deductible = 500.00
+ │    │    └── Attribute: policy.citations_count = 4
+ │    │
+ │    ├── [ Child Span: agent.fraud ] ──────── (Duration: 8.4 ms, Status: OK)
+ │    │    ├── Attribute: fraud.score = 12.00
+ │    │    ├── Attribute: fraud.siu_escalate = false
+ │    │    └── Attribute: fraud.flags_count = 0
+ │    │
+ │    ├── [ Child Span: agent.risk ] ───────── (Duration: 5.2 ms, Status: OK)
+ │    │    ├── Attribute: risk.tier = "LOW"
+ │    │    ├── Attribute: risk.approved_estimate = 2950.00
+ │    │    └── Attribute: risk.depreciation = 210.00
+ │    │
+ │    └── [ Child Span: agent.settle ] ─────── (Duration: 11.5 ms, Status: OK)
+ │         ├── Attribute: settlement.status = "SIMULATED_STP"
+ │         ├── Attribute: settlement.payout = 2240.00
+ │         └── Attribute: settlement.requires_human_approval = false
+ │
+ └── [ Langfuse LLM Generation Tracing & Session Scores ]
+      ├── intake_completeness: 1.00
+      ├── policy_eligibility: 1.00
+      ├── fraud_risk_score: 12.00
+      ├── proposed_payout: $2,240.00
+      └── straight_through_processing: 1.00
 ```
 
-- **LangGraph Callback Handler**: Every call to `claims_graph.invoke(..., config=config)` transmits execution telemetry.
-- **Trace Context**: Sessions are grouped by `claim_id`. User attribution tags the claimant.
-- **LLM Token Tracking**: Automatically captures prompt tokens, completion tokens, latency, and model names (`gemini-3.5-flash-lite`).
-- **Direct Web Access**: Trace URLs (`https://us.cloud.langfuse.com/project/cmvo4w90o01vkad0m6dgx498f/traces/{id}`) are linked in the Workbench header, the node drawer, and the audit log.
+### 1. Dual Exporter Architecture
+- **In-Memory Ring-Buffer Exporter**: Retains the last 250 finished spans in a thread-safe ring-buffer. Allows zero-dependency diagnostic inspection via `/api/telemetry/spans` and frontend telemetry visualization without requiring external infrastructure.
+- **Standard OTLP HTTP/Proto Exporter**: Automatically activates when `OTEL_EXPORTER_OTLP_ENDPOINT` is configured. Transmits traces directly to any OTLP-compliant collector (e.g. Jaeger, Grafana Tempo, SigNoz, Datadog, or Honeycomb).
+- **Console Exporter**: Toggled via `OTEL_TRACES_CONSOLE=true` for local terminal stream debugging.
+
+### 2. Standard Semantic Conventions & Attribute Catalogue
+| Scope | Attribute Key | Type | Description |
+|---|---|---|---|
+| **Root Claim** | `insurance.claim.id` | `string` | Unique claim identifier (e.g. `CLM-DEMO-001`) |
+| **Root Claim** | `claim.loss_type` | `string` | Peril category (collision, rear_collision, theft) |
+| **Root Claim** | `claim.claimed_amt` | `float` | Original amount claimed by policyholder |
+| **Root Claim** | `claim.status` | `string` | Terminal adjudication status (`SETTLED_STP`, `PENDING_REVIEW`) |
+| **Agent Intake** | `claim.completeness` | `float` | FNOL completeness ratio between 0.0 and 1.0 |
+| **Agent Intake** | `claim.missing_fields_count` | `int` | Count of missing mandatory attachments or data fields |
+| **Agent Policy** | `policy.eligible` | `bool` | Whether loss is covered under active contract |
+| **Agent Policy** | `policy.deductible` | `float` | Contractual deductible applied in USD |
+| **Agent Policy** | `policy.citations_count` | `int` | Number of verified FTS5 clauses cited |
+| **Agent Fraud** | `fraud.score` | `float` | Composite fraud score (0 - 100) |
+| **Agent Fraud** | `fraud.siu_escalate` | `bool` | Whether claim tripped the SIU freeze threshold ($\ge 75$) |
+| **Agent Risk** | `risk.tier` | `string` | Risk categorization (`LOW`, `MEDIUM`, `HIGH`) |
+| **Agent Risk** | `risk.approved_estimate`| `float` | OEM labor and parts benchmarked amount |
+| **Agent Settle** | `settlement.payout` | `float` | Net payout calculated via deterministic formula |
+| **Agent Settle** | `settlement.status` | `string` | Settlement stage (`SIMULATED_STP`, `DRAFT_DENIAL`, etc.) |
+
+### 3. OpenTelemetry Metric Instruments
+| Instrument Name | Type | Unit | Description |
+|---|---|---|---|
+| `claims.submitted.total` | Counter | `1` | Total count of claims ingested into the platform |
+| `claims.processed.total` | Counter | `1` | Total count of claims adjudicated by multi-agent graph |
+| `claims.siu_referrals.total` | Counter | `1` | Count of claims escalated to Special Investigations Unit |
+| `claims.policy_exceptions.total` | Counter | `1` | Count of coverage denials or contract exclusions drafted |
+| `claims.settlement.payout` | Histogram | `USD` | Distribution of approved claim payout amounts |
+| `claims.fraud.score` | Histogram | `1` | Distribution of composite fraud scores across all claims |
+| `agent.execution.duration_ms` | Histogram | `ms` | Granular per-agent execution latency in milliseconds |
+
+### 4. Telemetry REST Endpoints
+- `GET /api/telemetry/status`: Returns current OpenTelemetry runtime status, service name, metric totals, and recent spans.
+- `GET /api/telemetry/spans?claim_id={id}&limit=50`: Retrieves filtered OpenTelemetry spans captured by the in-memory buffer.
+- `POST /api/telemetry/reset`: Clears in-memory span buffer for clean testing sessions.
 
 ---
 

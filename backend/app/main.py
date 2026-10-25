@@ -1,8 +1,10 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from .core.config import API_HOST, API_PORT
+from .core.telemetry import telemetry_manager
 from .db.database import init_db
 from .api.routes import router
 
@@ -19,6 +21,18 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# OpenTelemetry correlation header middleware
+@app.middleware("http")
+async def add_telemetry_headers(request: Request, call_next):
+    response = await call_next(request)
+    trace_id = telemetry_manager.get_current_trace_id()
+    span_id = telemetry_manager.get_current_span_id()
+    if trace_id:
+        response.headers["X-Trace-Id"] = trace_id
+    if span_id:
+        response.headers["X-Span-Id"] = span_id
+    return response
+
 # Enable CORS for frontend UI
 app.add_middleware(
     CORSMiddleware,
@@ -26,6 +40,13 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
+# OpenTelemetry FastAPI Auto-Instrumentation
+FastAPIInstrumentor.instrument_app(
+    app,
+    tracer_provider=telemetry_manager.tracer_provider,
+    excluded_urls="docs,openapi.json"
 )
 
 app.include_router(router)
@@ -36,9 +57,14 @@ def root():
         "status": "online",
         "system": "Autonomous Multi-Agent Insurance Claims Processing PoC",
         "version": "1.0.0",
+        "telemetry": {
+            "opentelemetry": "active",
+            "service_name": telemetry_manager.service_name,
+        },
         "docs_url": "/docs"
     }
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("app.main:app", host=API_HOST, port=API_PORT, reload=True)
+

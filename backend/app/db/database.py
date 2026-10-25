@@ -36,6 +36,10 @@ def init_db():
         cursor.execute("ALTER TABLE claims ADD COLUMN trace_url TEXT;")
     except Exception:
         pass
+    try:
+        cursor.execute("ALTER TABLE claims ADD COLUMN otel_trace_id TEXT;")
+    except Exception:
+        pass
 
 
     # 2. Agent Runs Table

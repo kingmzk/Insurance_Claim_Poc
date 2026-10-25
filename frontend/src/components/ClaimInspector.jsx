@@ -51,6 +51,11 @@ export default function ClaimInspector({ claimState }) {
           </div>
           <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
             Policyholder: <strong style={{ color: '#fff' }}>{intake_data.claimant_name || 'N/A'}</strong> (Policy: {intake_data.policy_no})
+            {(claimState.otel_trace_id || claimState.trace_id) && (
+              <span style={{ marginLeft: '0.75rem', fontSize: '0.72rem', color: '#06b6d4', fontFamily: 'var(--font-mono)' }}>
+                OTel: {claimState.otel_trace_id || claimState.trace_id}
+              </span>
+            )}
           </div>
         </div>
 

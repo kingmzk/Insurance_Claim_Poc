@@ -103,6 +103,15 @@ export default function EnterpriseHeader({
           <span>Langfuse Live</span>
         </a>
 
+        <div 
+          className="status-pill" 
+          style={{ color: '#06b6d4', border: '1px solid rgba(6, 182, 212, 0.3)', background: 'rgba(6, 182, 212, 0.08)' }}
+          title="OpenTelemetry Distributed Tracing & Metric Instruments Active"
+        >
+          <Cpu size={12} color="#06b6d4" />
+          <span>OTel Active</span>
+        </div>
+
 
         <button 
           onClick={onResetDb}
