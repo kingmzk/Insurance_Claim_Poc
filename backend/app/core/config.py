@@ -2,6 +2,13 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
+# Enable system certificate store for corporate proxies and SSL interception
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except Exception:
+    pass
+
 # Find .env in project root or current dir
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 ROOT_DIR = BASE_DIR.parent

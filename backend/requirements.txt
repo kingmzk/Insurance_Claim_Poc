@@ -14,3 +14,4 @@ opentelemetry-sdk>=1.25.0
 opentelemetry-instrumentation-fastapi>=0.45b0
 opentelemetry-exporter-otlp-proto-http>=1.25.0
 prometheus-client>=0.20.0
+truststore>=0.9.0

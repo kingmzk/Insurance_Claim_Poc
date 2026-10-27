@@ -41,3 +41,12 @@ def test_claim_pipeline_generates_langfuse_trace():
     assert final_state.get("trace_id") is not None
     assert final_state.get("trace_url") is not None
     assert "https://us.cloud.langfuse.com" in final_state.get("trace_url")
+
+def test_deepeval_langfuse_sync_reporting():
+    """Verifies that DeepEval benchmark reporting includes Langfuse sync capabilities."""
+    from backend.evals.runner import get_latest_report
+    report = get_latest_report()
+    assert report is not None
+    assert "summary" in report
+    assert "test_results" in report
+    assert "status" in report

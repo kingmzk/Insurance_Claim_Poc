@@ -194,6 +194,34 @@ def run_all_evaluations() -> Dict[str, Any]:
     except Exception as e:
         print(f"Warning: Failed to save report file: {e}")
 
+    # Synchronize DeepEval scores and metrics to Langfuse
+    try:
+        from backend.app.services.observability_service import observability_service
+        if observability_service.is_enabled and observability_service.client:
+            for r in results:
+                metric_key = f"eval_{r['id'].lower().replace('-', '_')}"
+                observability_service.record_score(
+                    name=metric_key,
+                    value=float(r["score"]),
+                    session_id="deepeval_benchmarks",
+                    comment=f"{r['name']} ({r['metric']}) - Passed: {r['passed']}. Reason: {str(r.get('reason', ''))[:120]}"
+                )
+            observability_service.record_score(
+                name="deepeval_pass_rate",
+                value=float(pass_rate),
+                session_id="deepeval_benchmarks",
+                comment=f"DeepEval Benchmark Suite ({passed_tests}/{total_tests} passed, {pass_rate}%)"
+            )
+            observability_service.flush()
+            report["langfuse_synced"] = True
+            report["langfuse_session_id"] = "deepeval_benchmarks"
+            print("[OK] DeepEval benchmark scores synchronized with Langfuse.")
+        else:
+            report["langfuse_synced"] = False
+    except Exception as e:
+        print(f"Warning: Failed to sync DeepEval metrics to Langfuse: {e}")
+        report["langfuse_synced"] = False
+
     # Terminal summary print
     print(f"\n==================== DeepEval Results ====================")
     print(f"Total Tests: {total_tests} | Passed: {passed_tests} | Pass Rate: {pass_rate}% | Avg Score: {avg_score}")
