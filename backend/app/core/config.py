@@ -34,6 +34,8 @@ else:
     DATABASE_PATH = str(Path(_raw_db_path).resolve())
 Path(DATABASE_PATH).parent.mkdir(parents=True, exist_ok=True)
 DEFAULT_AUTHORITY_LIMIT = float(os.getenv("DEFAULT_AUTHORITY_LIMIT", "5000.0"))
+SENIOR_ADJUSTER_APPROVAL_LIMIT = float(os.getenv("SENIOR_ADJUSTER_APPROVAL_LIMIT", "10000.0"))
+DEFAULT_DEDUCTIBLE = float(os.getenv("DEFAULT_DEDUCTIBLE", "500.0"))
 FRAUD_THRESHOLD_ESCALATION = int(os.getenv("FRAUD_THRESHOLD_ESCALATION", "75"))
 FRAUD_THRESHOLD_LOW = int(os.getenv("FRAUD_THRESHOLD_LOW", "25"))
 API_HOST = os.getenv("API_HOST", "127.0.0.1")

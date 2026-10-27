@@ -1,12 +1,15 @@
 from datetime import datetime, timezone
+from typing import Dict, Any
 from ..models.state import ClaimState
 from ..services.policy_service import PolicyService
 from ..services.llm_service import LLMService
+from ..core.config import DEFAULT_DEDUCTIBLE
 
-def policy_agent(state: ClaimState) -> ClaimState:
+def policy_agent(state: ClaimState) -> Dict[str, Any]:
     """
     Policy Validation Agent: Checks active policy status via mock PAS
     and retrieves relevant policy clauses using SQLite FTS5.
+    Returns a pure state delta dictionary.
     """
     intake = state.get("intake_data", {})
     policy_no = intake.get("policy_no", "")
@@ -43,7 +46,7 @@ def policy_agent(state: ClaimState) -> ClaimState:
         "incident_description": incident_desc
     })
 
-    deductible = pas_info.get("standard_deductible", 500.0) if eligible else 0.0
+    deductible = pas_info.get("standard_deductible", DEFAULT_DEDUCTIBLE) if eligible else 0.0
     policy_limit = pas_info.get("single_incident_limit", 50000.0)
 
     policy_validation = {
@@ -57,36 +60,47 @@ def policy_agent(state: ClaimState) -> ClaimState:
         "exception_reason": rejection_reason if not eligible else None
     }
     
-    state["policy_validation"] = policy_validation
-    audit_events = state.get("audit_events", [])
-    
+    now_ts = datetime.now(timezone.utc).isoformat()
+
     if not eligible:
-        state["current_status"] = "PENDING_REVIEW"
-        state["route_reason"] = f"Gate 2 Exit: Coverage Exception Drafted — {rejection_reason}"
-        audit_events.append({
+        status = "PENDING_REVIEW"
+        reason = f"Gate 2 Exit: Coverage Exception Drafted — {rejection_reason}"
+        event = {
             "stage": "POLICY_VALIDATION",
             "event_type": "COVERAGE_EXCEPTION",
-            "route_reason": state["route_reason"],
+            "route_reason": reason,
             "evidence": {
                 "pas_status": pas_info.get("status"),
                 "citations": [c.get("section_title") for c in clauses],
                 "explanation": explanation
             },
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        })
+            "timestamp": now_ts
+        }
+        return {
+            "policy_validation": policy_validation,
+            "current_status": status,
+            "route_reason": reason,
+            "human_review_required": True,
+            "human_review_type": "COVERAGE_EXCEPTION",
+            "audit_events": [event]
+        }
     else:
-        state["current_status"] = "POLICY_VERIFIED"
-        state["route_reason"] = f"Gate 2 Pass: Coverage confirmed under active policy {policy_no}."
-        audit_events.append({
+        status = "POLICY_VERIFIED"
+        reason = f"Gate 2 Pass: Coverage confirmed under active policy {policy_no}."
+        event = {
             "stage": "POLICY_VALIDATION",
             "event_type": "POLICY_CONFIRMED",
-            "route_reason": state["route_reason"],
+            "route_reason": reason,
             "evidence": {
                 "deductible": deductible,
                 "citations": [c.get("section_title") for c in clauses]
             },
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        })
-        
-    state["audit_events"] = audit_events
-    return state
+            "timestamp": now_ts
+        }
+        return {
+            "policy_validation": policy_validation,
+            "current_status": status,
+            "route_reason": reason,
+            "human_review_required": False,
+            "audit_events": [event]
+        }

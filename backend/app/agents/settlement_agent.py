@@ -1,13 +1,15 @@
 from datetime import datetime, timezone
+from typing import Dict, Any
 from ..models.state import ClaimState
-from ..core.config import DEFAULT_AUTHORITY_LIMIT, FRAUD_THRESHOLD_LOW
+from ..core.config import DEFAULT_AUTHORITY_LIMIT, FRAUD_THRESHOLD_LOW, DEFAULT_DEDUCTIBLE
 from ..services.ledger_service import LedgerService
 
-def settlement_agent(state: ClaimState) -> ClaimState:
+def settlement_agent(state: ClaimState) -> Dict[str, Any]:
     """
     Settlement Agent: Applies deterministic payout arithmetic,
     evaluates Straight-Through Processing (STP) authority limits,
-    and executes simulated disbursement or routes to human adjuster.
+    and executes idempotent simulated disbursement or routes to human adjuster.
+    Returns a pure state delta dictionary.
     """
     claim_id = state.get("claim_id", "UNKNOWN")
     intake = state.get("intake_data", {})
@@ -15,33 +17,39 @@ def settlement_agent(state: ClaimState) -> ClaimState:
     fraud_rep = state.get("fraud_report", {})
     risk_ass = state.get("risk_assessment", {})
     claimant_name = intake.get("claimant_name", "Claimant")
+    now_ts = datetime.now(timezone.utc).isoformat()
     
     # Case 1: Ineligible / Coverage Denied at Policy Stage
     if not policy_val.get("eligible", False):
+        denial_reason = policy_val.get("exception_reason", "Policy exclusion applied")
         settlement_decision = {
             "status": "DRAFT_DENIAL",
             "proposed_payout": 0.0,
             "requires_human_approval": True,
             "authority_limit": DEFAULT_AUTHORITY_LIMIT,
-            "denial_reason": policy_val.get("exception_reason", "Policy exclusion applied"),
+            "denial_reason": denial_reason,
             "citations": policy_val.get("citations", [])
         }
-        state["settlement_decision"] = settlement_decision
-        state["current_status"] = "PENDING_REVIEW"
-        state["route_reason"] = f"Settlement Action: Coverage Denial Drafted — {settlement_decision['denial_reason']}"
-        
-        state.setdefault("audit_events", []).append({
+        reason = f"Settlement Action: Coverage Denial Drafted — {denial_reason}"
+        event = {
             "stage": "SETTLEMENT",
             "event_type": "DRAFT_DENIAL",
-            "route_reason": state["route_reason"],
-            "evidence": {"payout": 0.0, "reason": settlement_decision["denial_reason"]},
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        })
-        return state
+            "route_reason": reason,
+            "evidence": {"payout": 0.0, "reason": denial_reason},
+            "timestamp": now_ts
+        }
+        return {
+            "settlement_decision": settlement_decision,
+            "current_status": "PENDING_REVIEW",
+            "route_reason": reason,
+            "human_review_required": True,
+            "human_review_type": "COVERAGE_EXCEPTION",
+            "audit_events": [event]
+        }
 
     # Case 2: Eligible Policy — Deterministic Payout Arithmetic
     approved_estimate = float(risk_ass.get("approved_estimate", 0.0))
-    deductible = float(policy_val.get("deductible", 500.0))
+    deductible = float(policy_val.get("deductible", DEFAULT_DEDUCTIBLE))
     depreciation = float(risk_ass.get("depreciation", 0.0))
     
     # Formula: max(0, approved_estimate - deductible - depreciation)
@@ -57,15 +65,16 @@ def settlement_agent(state: ClaimState) -> ClaimState:
     
     stp_qualified = is_low_risk and is_low_fraud and within_limit
     
-    audit_events = state.get("audit_events", [])
-    
     if stp_qualified:
-        # Execute simulated ACH payout
+        # Execute idempotent simulated ACH payout
         disbursement = LedgerService.disburse_settlement(
             claim_id=claim_id,
             amount=proposed_payout,
             recipient=claimant_name
         )
+        
+        is_dup = disbursement.get("is_duplicate", False)
+        dup_note = " (Existing Disbursement Preserved)" if is_dup else ""
         
         settlement_decision = {
             "status": "SIMULATED_STP",
@@ -74,23 +83,31 @@ def settlement_agent(state: ClaimState) -> ClaimState:
             "requires_human_approval": False,
             "authority_limit": DEFAULT_AUTHORITY_LIMIT,
             "txn_ref": disbursement.get("txn_id"),
-            "disbursement_details": disbursement
+            "disbursement_details": disbursement,
+            "is_duplicate_disbursement": is_dup
         }
-        state["settlement_decision"] = settlement_decision
-        state["current_status"] = "SETTLED_STP"
-        state["route_reason"] = f"Gate 4 Pass: Low Risk & Payout ${proposed_payout:,.2f} <= ${DEFAULT_AUTHORITY_LIMIT:,.2f} — Fast-Track STP Completed."
+        status = "SETTLED_STP"
+        reason = f"Gate 4 Pass: Low Risk & Payout ${proposed_payout:,.2f} <= ${DEFAULT_AUTHORITY_LIMIT:,.2f} — Fast-Track STP Completed{dup_note}."
         
-        audit_events.append({
+        event = {
             "stage": "SETTLEMENT",
             "event_type": "SIMULATED_STP_DISBURSED",
-            "route_reason": state["route_reason"],
+            "route_reason": reason,
             "evidence": {
                 "payout": proposed_payout,
                 "txn_ref": disbursement.get("txn_id"),
-                "formula": f"max(0, {approved_estimate} - {deductible} - {depreciation})"
+                "formula": f"max(0, {approved_estimate} - {deductible} - {depreciation})",
+                "is_duplicate": is_dup
             },
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        })
+            "timestamp": now_ts
+        }
+        return {
+            "settlement_decision": settlement_decision,
+            "current_status": status,
+            "route_reason": reason,
+            "human_review_required": False,
+            "audit_events": [event]
+        }
     else:
         # Route to Adjuster Queue
         reasons = []
@@ -109,20 +126,24 @@ def settlement_agent(state: ClaimState) -> ClaimState:
             "authority_limit": DEFAULT_AUTHORITY_LIMIT,
             "approval_reasons": reasons
         }
-        state["settlement_decision"] = settlement_decision
-        state["current_status"] = "PENDING_REVIEW"
-        state["route_reason"] = f"Gate 4 Exit: Routed to Adjuster Queue — {', '.join(reasons)}"
+        status = "PENDING_REVIEW"
+        reason = f"Gate 4 Exit: Routed to Adjuster Queue — {', '.join(reasons)}"
         
-        audit_events.append({
+        event = {
             "stage": "SETTLEMENT",
             "event_type": "ADJUSTER_APPROVAL_REQUIRED",
-            "route_reason": state["route_reason"],
+            "route_reason": reason,
             "evidence": {
                 "proposed_payout": proposed_payout,
                 "reasons": reasons
             },
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        })
-        
-    state["audit_events"] = audit_events
-    return state
+            "timestamp": now_ts
+        }
+        return {
+            "settlement_decision": settlement_decision,
+            "current_status": status,
+            "route_reason": reason,
+            "human_review_required": True,
+            "human_review_type": "ADJUSTER_APPROVAL",
+            "audit_events": [event]
+        }

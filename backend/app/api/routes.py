@@ -4,8 +4,9 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query, Response
 
-from ..models.state import ClaimSubmissionRequest, ReviewDecisionRequest, ClaimState
-from ..workflow.graph import claims_graph
+from ..models.state import ClaimSubmissionRequest, ReviewDecisionRequest, ProvideInfoRequest, ClaimState, ClaimDocument
+from ..workflow.graph import claims_graph, resume_claim_workflow
+from ..core.auth import validate_review_authorization, resolve_reviewer_role
 from ..db.database import get_db_connection
 from ..services.ledger_service import LedgerService
 from ..services.observability_service import observability_service
@@ -277,6 +278,7 @@ def submit_claim(request: ClaimSubmissionRequest):
     config = {
         "run_name": f"ClaimWorkflow-{claim_id}",
         "tags": ["motor_claims", "langgraph", request.loss_type],
+        "configurable": {"thread_id": claim_id},
         "metadata": {
             "langfuse_trace_name": f"Insurance Claim Workflow: {claim_id}",
             "langfuse_session_id": claim_id,
@@ -439,7 +441,10 @@ def list_review_tasks(status: str = Query("PENDING")):
 
 @router.post("/reviews/{task_id}/decision")
 def record_review_decision(task_id: str, request: ReviewDecisionRequest):
-    """Adjuster or SIU investigator records a decision on a queued review task."""
+    """
+    Adjuster, Senior Adjuster, or SIU investigator records a decision on a queued review task.
+    Enforces Role-Based Access Control (RBAC) and authority thresholds.
+    """
     conn = get_db_connection()
     cursor = conn.cursor()
     
@@ -459,16 +464,50 @@ def record_review_decision(task_id: str, request: ReviewDecisionRequest):
     claim_state = json.loads(claim_row["state_json"])
     now = datetime.now(timezone.utc).isoformat()
     
-    # Process human decision
+    # 1. Enforce Role-Based Authorization & Financial Authority Limits
+    payout_to_check = (
+        request.adjusted_payout 
+        if request.adjusted_payout is not None 
+        else float(claim_state.get("settlement_decision", {}).get("proposed_payout", 0.0))
+    )
+    is_auth, resolved_role, auth_err = validate_review_authorization(
+        task_type=task["task_type"],
+        reviewer_id=request.reviewer_id,
+        reviewer_role=request.reviewer_role,
+        payout_amount=payout_to_check
+    )
+    if not is_auth:
+        conn.close()
+        raise HTTPException(status_code=403, detail=auth_err)
+
+    # 2. Resume Checkpointed LangGraph Workflow
+    try:
+        resume_claim_workflow(
+            claim_id=claim_id,
+            human_decision={
+                "decision": request.decision,
+                "reviewer_id": request.reviewer_id,
+                "reviewer_role": resolved_role,
+                "notes": request.notes,
+                "adjusted_payout": request.adjusted_payout
+            }
+        )
+    except Exception as e:
+        # Non-fatal if in-memory checkpoint was cleared or running in decoupled process
+        pass
+
+    # 3. Process human decision
     if request.decision == "APPROVED":
-        payout = request.adjusted_payout if request.adjusted_payout is not None else claim_state.get("settlement_decision", {}).get("proposed_payout", 0.0)
+        payout = request.adjusted_payout if request.adjusted_payout is not None else float(claim_state.get("settlement_decision", {}).get("proposed_payout", 0.0))
         
-        # Disburse payment in ledger
+        # Idempotent disbursement in simulated ledger
         disbursement = LedgerService.disburse_settlement(
             claim_id=claim_id,
             amount=payout,
             recipient=claim_state.get("intake_data", {}).get("claimant_name", "Claimant")
         )
+        is_dup = disbursement.get("is_duplicate", False)
+        dup_note = " (Duplicate Payment Prevented)" if is_dup else ""
         
         claim_state["current_status"] = "SETTLED_MANUAL"
         claim_state["settlement_decision"] = {
@@ -476,9 +515,11 @@ def record_review_decision(task_id: str, request: ReviewDecisionRequest):
             "status": "APPROVED_BY_ADJUSTER",
             "net_payout": payout,
             "txn_ref": disbursement.get("txn_id"),
-            "adjuster_notes": request.notes
+            "adjuster_notes": request.notes,
+            "reviewer_role": resolved_role,
+            "is_duplicate_disbursement": is_dup
         }
-        claim_state["route_reason"] = f"Adjuster approved payout of ${payout:,.2f}. Txn: {disbursement.get('txn_id')}"
+        claim_state["route_reason"] = f"Adjuster ({resolved_role}) approved payout of ${payout:,.2f}. Txn: {disbursement.get('txn_id')}{dup_note}"
         
     elif request.decision == "REJECTED":
         claim_state["current_status"] = "DENIED_BY_ADJUSTER"
@@ -486,12 +527,13 @@ def record_review_decision(task_id: str, request: ReviewDecisionRequest):
             **claim_state.get("settlement_decision", {}),
             "status": "DENIED",
             "net_payout": 0.0,
-            "denial_notes": request.notes
+            "denial_notes": request.notes,
+            "reviewer_role": resolved_role
         }
-        claim_state["route_reason"] = f"Adjuster confirmed claim denial: {request.notes}"
+        claim_state["route_reason"] = f"Adjuster ({resolved_role}) confirmed claim denial: {request.notes}"
     else: # REQUEST_INFO
         claim_state["current_status"] = "NEEDS_INFO"
-        claim_state["route_reason"] = f"Adjuster requested additional information: {request.notes}"
+        claim_state["route_reason"] = f"Adjuster ({resolved_role}) requested additional information: {request.notes}"
         
     # Update review task
     cursor.execute("""
@@ -515,7 +557,12 @@ def record_review_decision(task_id: str, request: ReviewDecisionRequest):
         claim_id,
         f"REVIEW_{request.decision}",
         claim_state["route_reason"],
-        json.dumps({"reviewer": request.reviewer_id, "notes": request.notes}),
+        json.dumps({
+            "reviewer": request.reviewer_id,
+            "role": resolved_role,
+            "notes": request.notes,
+            "adjusted_payout": request.adjusted_payout
+        }),
         now
     ))
     
@@ -536,9 +583,61 @@ def record_review_decision(task_id: str, request: ReviewDecisionRequest):
     return {
         "task_id": task_id,
         "decision": request.decision,
+        "reviewer_role": resolved_role,
         "updated_claim_status": claim_state["current_status"],
         "claim_state": claim_state
     }
+
+@router.post("/claims/{claim_id}/provide_info")
+def provide_claim_information(
+    claim_id: str,
+    request: ProvideInfoRequest
+):
+    """
+    Human-in-the-Loop Re-entry: Claimant or broker submits missing information
+    (e.g. VIN, repair estimate) to resume an interrupted workflow from Gate 1.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT state_json FROM claims WHERE claim_id = ?;", (claim_id,))
+    row = cursor.fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Claim not found")
+        
+    state = json.loads(row["state_json"])
+    intake = state.get("intake_data", {})
+    if request.vin:
+        intake["vin"] = request.vin
+    if request.documents:
+        current_docs = intake.get("documents", [])
+        current_docs.extend([d.model_dump() for d in request.documents])
+        intake["documents"] = current_docs
+        
+    state["intake_data"] = intake
+    state["current_status"] = "RE_ENTERED"
+    state["route_reason"] = f"Claimant provided requested information. Re-entering adjudication pipeline."
+    
+    # Resolve pending review task
+    now = datetime.now(timezone.utc).isoformat()
+    cursor.execute("""
+    UPDATE review_tasks SET status = 'RESOLVED', decision_note = ?, resolved_at = ?
+    WHERE claim_id = ? AND task_type = 'NEEDS_INFO' AND status = 'PENDING';
+    """, (f"Claimant updated fields: vin={request.vin}, docs_added={len(request.documents)}", now, claim_id))
+    
+    cursor.execute("""
+    INSERT INTO audit_events (claim_id, stage, event_type, route_reason, evidence_json, created_at)
+    VALUES (?, 'HUMAN_IN_THE_LOOP', 'INFO_PROVIDED', ?, ?, ?);
+    """, (claim_id, state["route_reason"], json.dumps({"vin": request.vin, "docs_count": len(request.documents)}), now))
+    
+    conn.commit()
+    conn.close()
+    
+    # Re-run workflow from intake with updated information
+    config = {"configurable": {"thread_id": claim_id}}
+    resumed = claims_graph.invoke(state, config=config)
+    persist_claim_run(resumed)
+    return resumed
 
 @router.get("/scenarios")
 def list_scenarios():

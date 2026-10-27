@@ -1,11 +1,13 @@
 from datetime import datetime, timezone
+from typing import Dict, Any
 from ..models.state import ClaimState
 from ..services.cost_service import CostService
 
-def risk_agent(state: ClaimState) -> ClaimState:
+def risk_agent(state: ClaimState) -> Dict[str, Any]:
     """
     Risk Assessment Agent: Benchmarks repair line items against OEM parts catalog
     and labor guides, applies component depreciation, and assigns a risk tier.
+    Returns a pure state delta dictionary.
     """
     intake = state.get("intake_data", {})
     claimed_amt = float(intake.get("claimed_amt", 0.0))
@@ -22,22 +24,22 @@ def risk_agent(state: ClaimState) -> ClaimState:
         "valuation_notes": valuation["valuation_notes"]
     }
     
-    state["risk_assessment"] = risk_assessment
-    audit_events = state.get("audit_events", [])
+    now_ts = datetime.now(timezone.utc).isoformat()
+    reason = f"Risk Assessment Complete: Assigned {valuation['risk_tier']} Risk Tier."
     
-    state["current_status"] = "RISK_ASSESSED"
-    state["route_reason"] = f"Risk Assessment Complete: Assigned {valuation['risk_tier']} Risk Tier."
-    audit_events.append({
+    event = {
         "stage": "RISK_ASSESSMENT",
         "event_type": "RISK_ASSESSED",
-        "route_reason": state["route_reason"],
+        "route_reason": reason,
         "evidence": {
             "approved_estimate": valuation["approved_estimate"],
             "depreciation": valuation["depreciation"],
             "risk_tier": valuation["risk_tier"]
         },
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    })
+        "timestamp": now_ts
+    }
     
-    state["audit_events"] = audit_events
-    return state
+    return {
+        "risk_assessment": risk_assessment,
+        "audit_events": [event]
+    }

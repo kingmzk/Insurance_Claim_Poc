@@ -1,14 +1,15 @@
 import time
 from datetime import datetime, timezone
+from typing import Dict, Any
 from ..models.state import ClaimState
 from ..services.llm_service import LLMService
 
-def intake_agent(state: ClaimState) -> ClaimState:
+def intake_agent(state: ClaimState) -> Dict[str, Any]:
     """
     Intake Agent: Extracts FNOL entities and validates required fields.
     Flags missing items and determines completeness.
+    Returns a pure state delta dictionary.
     """
-    start_time = time.time()
     intake = state.get("intake_data", {})
     claim_id = state.get("claim_id", "UNKNOWN")
     
@@ -39,32 +40,45 @@ def intake_agent(state: ClaimState) -> ClaimState:
             "loss_type": intake.get("loss_type", "collision")
         })
 
-    state["intake_data"] = {**intake, **enriched}
-    state["completeness"] = completeness
-    state["missing_fields"] = missing
-    
-    audit_events = state.get("audit_events", [])
-    
+    updated_intake = {**intake, **enriched}
+    now_ts = datetime.now(timezone.utc).isoformat()
+
     if completeness < 1.0:
-        state["current_status"] = "NEEDS_INFO"
-        state["route_reason"] = f"Gate 1 Exit: Missing mandatory fields {missing}."
-        audit_events.append({
+        status = "NEEDS_INFO"
+        reason = f"Gate 1 Exit: Missing mandatory fields {missing}."
+        event = {
             "stage": "INTAKE",
             "event_type": "NEEDS_INFO",
-            "route_reason": state["route_reason"],
+            "route_reason": reason,
             "evidence": {"missing_fields": missing, "completeness": completeness},
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        })
+            "timestamp": now_ts
+        }
+        return {
+            "intake_data": updated_intake,
+            "completeness": completeness,
+            "missing_fields": missing,
+            "current_status": status,
+            "route_reason": reason,
+            "human_review_required": True,
+            "human_review_type": "NEEDS_INFO",
+            "audit_events": [event]
+        }
     else:
-        state["current_status"] = "INTAKE_PASSED"
-        state["route_reason"] = "Gate 1 Pass: All mandatory fields and documents present."
-        audit_events.append({
+        status = "INTAKE_PASSED"
+        reason = "Gate 1 Pass: All mandatory fields and documents present."
+        event = {
             "stage": "INTAKE",
             "event_type": "INTAKE_COMPLETED",
-            "route_reason": state["route_reason"],
+            "route_reason": reason,
             "evidence": {"completeness": 1.0, "vin": intake.get("vin")},
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        })
-        
-    state["audit_events"] = audit_events
-    return state
+            "timestamp": now_ts
+        }
+        return {
+            "intake_data": updated_intake,
+            "completeness": completeness,
+            "missing_fields": missing,
+            "current_status": status,
+            "route_reason": reason,
+            "human_review_required": False,
+            "audit_events": [event]
+        }
