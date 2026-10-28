@@ -40,6 +40,8 @@ FRAUD_THRESHOLD_ESCALATION = int(os.getenv("FRAUD_THRESHOLD_ESCALATION", "75"))
 FRAUD_THRESHOLD_LOW = int(os.getenv("FRAUD_THRESHOLD_LOW", "25"))
 API_HOST = os.getenv("API_HOST", "127.0.0.1")
 API_PORT = int(os.getenv("API_PORT", "8000"))
+_cors_env = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000,http://127.0.0.1:5173,http://127.0.0.1:3000")
+CORS_ORIGINS = [orig.strip() for orig in _cors_env.split(",") if orig.strip()]
 
 # Langfuse Observability
 LANGFUSE_SECRET_KEY = os.getenv("LANGFUSE_SECRET_KEY", "")

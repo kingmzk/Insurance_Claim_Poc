@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
-from .core.config import API_HOST, API_PORT
+from .core.config import API_HOST, API_PORT, CORS_ORIGINS
 from .core.telemetry import telemetry_manager, CONTENT_TYPE_LATEST
 from .db.database import init_db
 from .api.routes import router
@@ -42,7 +42,7 @@ async def add_telemetry_headers(request: Request, call_next):
 # Enable CORS for frontend UI
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
