@@ -62,3 +62,9 @@ if LANGFUSE_HOST:
 OTEL_SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME", "insurance-claims-orchestrator")
 OTEL_EXPORTER_OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
 OTEL_TRACES_CONSOLE = os.getenv("OTEL_TRACES_CONSOLE", "false").lower() in ("true", "1", "yes")
+
+# Authentication & JWT Security Configuration
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "insurance-claims-super-secret-key-poc-2026")
+JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+JWT_EXPIRATION_MINUTES = int(os.getenv("JWT_EXPIRATION_MINUTES", "480"))
+

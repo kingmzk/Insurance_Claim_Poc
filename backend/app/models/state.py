@@ -58,6 +58,14 @@ class ProvideInfoRequest(BaseModel):
     documents: List[ClaimDocument] = Field(default_factory=list)
     notes: str = ""
 
+class TokenRequest(BaseModel):
+    persona: Optional[str] = Field(default=None, description="Persona name: adjuster, senior_adjuster, claims_manager, siu_investigator, policy_specialist")
+    user_id: Optional[str] = None
+    role: Optional[str] = None
+    name: Optional[str] = None
+    authority_limit: Optional[float] = None
+
+
 # Shared LangGraph State Schema
 class ClaimState(TypedDict, total=False):
     claim_id: str

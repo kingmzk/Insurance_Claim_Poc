@@ -1,3 +1,4 @@
+import json
 from typing import Callable, Dict, Any, Optional, List
 from datetime import datetime, timezone
 from langgraph.graph import StateGraph, END
@@ -311,14 +312,37 @@ claims_checkpointer = MemorySaver()
 claims_graph = build_claims_graph(checkpointer=claims_checkpointer)
 
 
-def resume_claim_workflow(claim_id: str, human_decision: Dict[str, Any], config: Optional[Dict[str, Any]] = None) -> ClaimState:
+def resume_claim_workflow(
+    claim_id: str,
+    human_decision: Dict[str, Any],
+    config: Optional[Dict[str, Any]] = None
+) -> ClaimState:
     """
     Resumes an existing checkpointed claim graph run by injecting human decision state.
+    Recovers state from SQLite persistence if memory checkpoint was cleared (e.g., after server restart).
     """
     cfg = config or {"configurable": {"thread_id": claim_id}}
-    # Inject human decision and resume
+
+    # 1. Verify in-memory checkpoint state; if missing, recover from persistent SQLite store
+    curr_state = claims_graph.get_state(cfg)
+    if not curr_state or not curr_state.values:
+        try:
+            from ..db.database import get_db_connection
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT state_json FROM claims WHERE claim_id = ?;", (claim_id,))
+            row = cursor.fetchone()
+            conn.close()
+            if row and row["state_json"]:
+                recovered_state = json.loads(row["state_json"])
+                claims_graph.update_state(cfg, recovered_state)
+        except Exception:
+            pass
+
+    # 2. Inject human decision and resume graph execution
     claims_graph.update_state(cfg, {
         "human_decision": human_decision,
         "human_review_resolved": True
     })
     return claims_graph.invoke(None, config=cfg)
+

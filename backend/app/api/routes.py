@@ -1,12 +1,21 @@
 import json
 import uuid
 from datetime import datetime, timezone
-from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Query, Response
+from typing import List, Optional, Dict, Any
+from fastapi import APIRouter, HTTPException, Query, Response, Depends
 
-from ..models.state import ClaimSubmissionRequest, ReviewDecisionRequest, ProvideInfoRequest, ClaimState, ClaimDocument
+from ..models.state import ClaimSubmissionRequest, ReviewDecisionRequest, ProvideInfoRequest, ClaimState, ClaimDocument, TokenRequest
 from ..workflow.graph import claims_graph, resume_claim_workflow
-from ..core.auth import validate_review_authorization, resolve_reviewer_role
+from ..core.auth import (
+    validate_review_authorization,
+    resolve_reviewer_role,
+    create_access_token,
+    decode_access_token,
+    get_current_user,
+    require_roles,
+    DEMO_PERSONAS,
+    Role
+)
 from ..db.database import get_db_connection
 from ..services.ledger_service import LedgerService
 from ..services.observability_service import observability_service
@@ -15,7 +24,68 @@ from ..core.telemetry import telemetry_manager, CONTENT_TYPE_LATEST
 router = APIRouter(prefix="/api")
 
 
+# ------------------------------------------------------------------------------
+# Authentication & Persona Authorization Endpoints
+# ------------------------------------------------------------------------------
+@router.get("/auth/personas", tags=["Authentication"])
+def list_personas():
+    """Lists available pre-configured demo personas with their roles and authority limits."""
+    return list(DEMO_PERSONAS.values())
+
+
+@router.post("/auth/token", tags=["Authentication"])
+def issue_access_token(request: TokenRequest):
+    """
+    Issues a cryptographically signed HMAC-SHA256 Bearer JWT token.
+    Can be requested by specifying a persona name ('adjuster', 'senior_adjuster', 'claims_manager', 'siu_investigator', 'policy_specialist')
+    or by providing explicit user credentials and role.
+    """
+    if request.persona:
+        p_key = request.persona.lower().strip()
+        if p_key not in DEMO_PERSONAS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unknown persona '{request.persona}'. Available personas: {list(DEMO_PERSONAS.keys())}"
+            )
+        persona_info = DEMO_PERSONAS[p_key]
+        user_id = persona_info["user_id"]
+        role = persona_info["role"]
+        name = persona_info["name"]
+        authority_limit = persona_info["authority_limit"]
+    else:
+        user_id = request.user_id or "adjuster_01"
+        role = resolve_reviewer_role(user_id, request.role)
+        name = request.name or user_id.replace("_", " ").title()
+        authority_limit = request.authority_limit or 5000.0
+
+    token_payload = {
+        "sub": user_id,
+        "user_id": user_id,
+        "role": role,
+        "name": name,
+        "authority_limit": authority_limit
+    }
+    access_token = create_access_token(token_payload)
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": token_payload
+    }
+
+
+@router.get("/auth/me", tags=["Authentication"])
+def get_authenticated_user_profile(current_user: Optional[Dict[str, Any]] = Depends(get_current_user)):
+    """Returns the authenticated user profile decoded from the Bearer JWT token."""
+    if not current_user:
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated. Provide a valid Bearer JWT token in the Authorization header."
+        )
+    return current_user
+
+
 # Predefined Synthetic Demo Scenarios
+
 SYNTHETIC_SCENARIOS = {
     "routine_stp": {
         "key": "routine_stp",
@@ -440,10 +510,15 @@ def list_review_tasks(status: str = Query("PENDING")):
     return tasks
 
 @router.post("/reviews/{task_id}/decision")
-def record_review_decision(task_id: str, request: ReviewDecisionRequest):
+def record_review_decision(
+    task_id: str,
+    request: ReviewDecisionRequest,
+    current_user: Optional[Dict[str, Any]] = Depends(get_current_user)
+):
     """
     Adjuster, Senior Adjuster, or SIU investigator records a decision on a queued review task.
     Enforces Role-Based Access Control (RBAC) and authority thresholds.
+    Accepts Bearer JWT authentication or falls back to request reviewer parameters for backward compatibility.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -464,6 +539,10 @@ def record_review_decision(task_id: str, request: ReviewDecisionRequest):
     claim_state = json.loads(claim_row["state_json"])
     now = datetime.now(timezone.utc).isoformat()
     
+    # Resolve reviewer identity: Bearer token takes precedence over request body
+    reviewer_id = current_user["user_id"] if current_user else request.reviewer_id
+    reviewer_role = current_user["role"] if current_user else request.reviewer_role
+
     # 1. Enforce Role-Based Authorization & Financial Authority Limits
     payout_to_check = (
         request.adjusted_payout 
@@ -472,8 +551,8 @@ def record_review_decision(task_id: str, request: ReviewDecisionRequest):
     )
     is_auth, resolved_role, auth_err = validate_review_authorization(
         task_type=task["task_type"],
-        reviewer_id=request.reviewer_id,
-        reviewer_role=request.reviewer_role,
+        reviewer_id=reviewer_id,
+        reviewer_role=reviewer_role,
         payout_amount=payout_to_check
     )
     if not is_auth:
@@ -482,16 +561,18 @@ def record_review_decision(task_id: str, request: ReviewDecisionRequest):
 
     # 2. Resume Checkpointed LangGraph Workflow
     try:
-        resume_claim_workflow(
+        resumed_state = resume_claim_workflow(
             claim_id=claim_id,
             human_decision={
                 "decision": request.decision,
-                "reviewer_id": request.reviewer_id,
+                "reviewer_id": reviewer_id,
                 "reviewer_role": resolved_role,
                 "notes": request.notes,
                 "adjusted_payout": request.adjusted_payout
             }
         )
+        if resumed_state and "audit_events" in resumed_state:
+            claim_state["audit_events"] = resumed_state["audit_events"]
     except Exception as e:
         # Non-fatal if in-memory checkpoint was cleared or running in decoupled process
         pass
@@ -558,7 +639,7 @@ def record_review_decision(task_id: str, request: ReviewDecisionRequest):
         f"REVIEW_{request.decision}",
         claim_state["route_reason"],
         json.dumps({
-            "reviewer": request.reviewer_id,
+            "reviewer": reviewer_id,
             "role": resolved_role,
             "notes": request.notes,
             "adjusted_payout": request.adjusted_payout
@@ -573,7 +654,7 @@ def record_review_decision(task_id: str, request: ReviewDecisionRequest):
     observability_service.record_human_review(
         claim_id=claim_id,
         decision=request.decision,
-        reviewer_id=request.reviewer_id,
+        reviewer_id=reviewer_id,
         adjusted_payout=request.adjusted_payout,
         notes=request.notes,
         trace_id=claim_state.get("trace_id")
@@ -583,10 +664,12 @@ def record_review_decision(task_id: str, request: ReviewDecisionRequest):
     return {
         "task_id": task_id,
         "decision": request.decision,
+        "reviewer_id": reviewer_id,
         "reviewer_role": resolved_role,
         "updated_claim_status": claim_state["current_status"],
         "claim_state": claim_state
     }
+
 
 @router.post("/claims/{claim_id}/provide_info")
 def provide_claim_information(
